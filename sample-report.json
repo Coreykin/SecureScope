@@ -1,0 +1,87 @@
+{
+  "tool": "SecureScope",
+  "target": "sample_app",
+  "summary": {
+    "total_findings": 6,
+    "by_severity": {
+      "Critical": 2,
+      "High": 3,
+      "Medium": 1,
+      "Low": 0
+    },
+    "by_stride": {
+      "Information Disclosure": 3,
+      "Spoofing": 1,
+      "Elevation of Privilege": 1,
+      "Tampering": 1
+    }
+  },
+  "findings": [
+    {
+      "rule_id": "SS001",
+      "title": "Debug mode enabled",
+      "stride": "Information Disclosure",
+      "severity": "High",
+      "file": "app.py",
+      "line": 5,
+      "evidence": "DEBUG = True",
+      "explanation": "Debug output can expose stack traces, configuration data, and application internals.",
+      "recommendation": "Disable debug mode outside local development."
+    },
+    {
+      "rule_id": "SS002",
+      "title": "Hard-coded secret",
+      "stride": "Information Disclosure",
+      "severity": "Critical",
+      "file": "app.py",
+      "line": 6,
+      "evidence": "api_key = \"[REDACTED]\"",
+      "explanation": "A credential stored in source code can leak through repository access or version history.",
+      "recommendation": "Load secrets from an approved secret manager or protected environment variable."
+    },
+    {
+      "rule_id": "SS003",
+      "title": "Weak Flask session cookie setting",
+      "stride": "Spoofing",
+      "severity": "High",
+      "file": "app.py",
+      "line": 7,
+      "evidence": "SESSION_COOKIE_SECURE = False",
+      "explanation": "Weak cookie settings can make session theft or impersonation easier.",
+      "recommendation": "Enable Secure and HttpOnly session-cookie protections in production."
+    },
+    {
+      "rule_id": "SS005",
+      "title": "Shell execution enabled",
+      "stride": "Elevation of Privilege",
+      "severity": "High",
+      "file": "app.py",
+      "line": 11,
+      "evidence": "return subprocess.run(request.form[\"cmd\"], shell=True, capture_output=True).stdout",
+      "explanation": "Shell interpretation can enable command injection when input is attacker controlled.",
+      "recommendation": "Avoid shell=True and pass a validated argument list to subprocess."
+    },
+    {
+      "rule_id": "SS006",
+      "title": "Unsafe dynamic code execution",
+      "stride": "Tampering",
+      "severity": "Critical",
+      "file": "app.py",
+      "line": 15,
+      "evidence": "return str(eval(request.form[\"expression\"]))",
+      "explanation": "Dynamic execution may allow an attacker to alter program behavior.",
+      "recommendation": "Replace dynamic execution with explicit parsing and an allowlist of permitted operations."
+    },
+    {
+      "rule_id": "SS004",
+      "title": "Insecure HTTP endpoint",
+      "stride": "Information Disclosure",
+      "severity": "Medium",
+      "file": "app.py",
+      "line": 19,
+      "evidence": "endpoint = \"http://example.com/customer-data\"",
+      "explanation": "Unencrypted transport can expose or alter data in transit.",
+      "recommendation": "Use HTTPS and validate the remote certificate."
+    }
+  ]
+}
