@@ -1,41 +1,30 @@
 {
   "tool": "SecureScope",
+  "version": "0.2.0",
+  "limitations": "Static indicators require human review. No dataflow or complete STRIDE coverage. Raw source is withheld to protect secrets.",
   "target": "sample_app",
   "summary": {
-    "total_findings": 6,
+    "total_findings": 4,
     "by_severity": {
-      "Critical": 2,
+      "Critical": 1,
       "High": 3,
-      "Medium": 1,
+      "Medium": 0,
       "Low": 0
     },
     "by_stride": {
-      "Information Disclosure": 3,
-      "Spoofing": 1,
-      "Elevation of Privilege": 1,
-      "Tampering": 1
+      "Information Disclosure": 2,
+      "Spoofing": 2
     }
   },
   "findings": [
-    {
-      "rule_id": "SS001",
-      "title": "Debug mode enabled",
-      "stride": "Information Disclosure",
-      "severity": "High",
-      "file": "app.py",
-      "line": 5,
-      "evidence": "DEBUG = True",
-      "explanation": "Debug output can expose stack traces, configuration data, and application internals.",
-      "recommendation": "Disable debug mode outside local development."
-    },
     {
       "rule_id": "SS002",
       "title": "Hard-coded secret",
       "stride": "Information Disclosure",
       "severity": "Critical",
       "file": "app.py",
-      "line": 6,
-      "evidence": "api_key = \"[REDACTED]\"",
+      "line": 8,
+      "evidence": "Hard-coded secret detected; source content withheld. Review the source at this location.",
       "explanation": "A credential stored in source code can leak through repository access or version history.",
       "recommendation": "Load secrets from an approved secret manager or protected environment variable."
     },
@@ -45,43 +34,32 @@
       "stride": "Spoofing",
       "severity": "High",
       "file": "app.py",
-      "line": 7,
-      "evidence": "SESSION_COOKIE_SECURE = False",
+      "line": 9,
+      "evidence": "Weak Flask session cookie setting detected; source content withheld. Review the source at this location.",
       "explanation": "Weak cookie settings can make session theft or impersonation easier.",
       "recommendation": "Enable Secure and HttpOnly session-cookie protections in production."
     },
     {
-      "rule_id": "SS005",
-      "title": "Shell execution enabled",
-      "stride": "Elevation of Privilege",
+      "rule_id": "SS003",
+      "title": "Weak Flask session cookie setting",
+      "stride": "Spoofing",
       "severity": "High",
       "file": "app.py",
-      "line": 11,
-      "evidence": "return subprocess.run(request.form[\"cmd\"], shell=True, capture_output=True).stdout",
-      "explanation": "Shell interpretation can enable command injection when input is attacker controlled.",
-      "recommendation": "Avoid shell=True and pass a validated argument list to subprocess."
+      "line": 10,
+      "evidence": "Weak Flask session cookie setting detected; source content withheld. Review the source at this location.",
+      "explanation": "Weak cookie settings can make session theft or impersonation easier.",
+      "recommendation": "Enable Secure and HttpOnly session-cookie protections in production."
     },
     {
-      "rule_id": "SS006",
-      "title": "Unsafe dynamic code execution",
-      "stride": "Tampering",
-      "severity": "Critical",
-      "file": "app.py",
-      "line": 15,
-      "evidence": "return str(eval(request.form[\"expression\"]))",
-      "explanation": "Dynamic execution may allow an attacker to alter program behavior.",
-      "recommendation": "Replace dynamic execution with explicit parsing and an allowlist of permitted operations."
-    },
-    {
-      "rule_id": "SS004",
-      "title": "Insecure HTTP endpoint",
+      "rule_id": "SS001",
+      "title": "Debug mode enabled",
       "stride": "Information Disclosure",
-      "severity": "Medium",
+      "severity": "High",
       "file": "app.py",
-      "line": 19,
-      "evidence": "endpoint = \"http://example.com/customer-data\"",
-      "explanation": "Unencrypted transport can expose or alter data in transit.",
-      "recommendation": "Use HTTPS and validate the remote certificate."
+      "line": 17,
+      "evidence": "Debug mode enabled detected; source content withheld. Review the source at this location.",
+      "explanation": "Debug output can expose stack traces, configuration data, and application internals.",
+      "recommendation": "Disable debug mode outside local development."
     }
   ]
 }

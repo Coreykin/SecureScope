@@ -4,6 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import ast
+import csv
+from urllib.parse import urlsplit
 import html
 import json
 import re
@@ -74,30 +77,139 @@ TEXT_EXTENSIONS = {".py", ".txt", ".ini", ".cfg", ".toml", ".yaml", ".yml", ".js
 SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", "dist", "build"}
 
 
+VERSION = "0.2.0"
+
+
+def _name(node):
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return _name(node.value) + "." + node.attr
+    return ""
+
+
+def _setting(node):
+    if isinstance(node, ast.Subscript) and _name(node.value).endswith(".config"):
+        if isinstance(node.slice, ast.Constant):
+            return str(node.slice.value)
+    return _name(node).split(".")[-1]
+
+
+def _literal(node):
+    return node.value if isinstance(node, ast.Constant) else None
+
+
+def _secret_key(key):
+    return bool(re.search(r"(?:^|_)(password|passwd|secret|secret_key|api_key|token|access_token)(?:$|_)", key, re.I))
+
+
+def _python_hits(source):
+    tree = ast.parse(source)
+    hits = set()
+    def setting(key, value, line):
+        v = _literal(value)
+        if key.upper() == "DEBUG" and v in (True, 1):
+            hits.add(("SS001", line))
+        if _secret_key(key) and isinstance(v, str) and v.strip():
+            hits.add(("SS002", line))
+        if key.upper() in {"SESSION_COOKIE_SECURE", "SESSION_COOKIE_HTTPONLY"} and v in (False, 0):
+            hits.add(("SS003", line))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                setting(_setting(target), node.value, node.lineno)
+        elif isinstance(node, ast.AnnAssign) and node.value:
+            setting(_setting(node.target), node.value, node.lineno)
+        elif isinstance(node, ast.Call):
+            name = _name(node.func)
+            kw = {k.arg: k.value for k in node.keywords if k.arg}
+            if name.endswith(".config.update"):
+                for key, value in kw.items():
+                    setting(key, value, value.lineno)
+                for arg in node.args:
+                    if isinstance(arg, ast.Dict):
+                        for k, v in zip(arg.keys, arg.values):
+                            if isinstance(k, ast.Constant):
+                                setting(str(k.value), v, v.lineno)
+            if name.endswith(".run") and _literal(kw.get("debug")) is True:
+                hits.add(("SS001", node.lineno))
+            if name in {"subprocess.run", "subprocess.call", "subprocess.Popen"} and _literal(kw.get("shell")) is True:
+                hits.add(("SS005", node.lineno))
+            if name in {"eval", "exec", "builtins.eval", "builtins.exec"}:
+                hits.add(("SS006", node.lineno))
+            if name in {"CORS", "flask_cors.CORS", "cross_origin"}:
+                # A wildcard route alone does not imply wildcard origins.
+                origins = kw.get("origins")
+                wildcard = _literal(origins) == "*"
+                if isinstance(origins, (ast.List, ast.Tuple)):
+                    wildcard = any(_literal(v) == "*" for v in origins.elts)
+                resources = kw.get("resources")
+                if isinstance(resources, ast.Dict):
+                    for settings in resources.values:
+                        if isinstance(settings, ast.Dict):
+                            for k, v in zip(settings.keys, settings.values):
+                                if _literal(k) == "origins" and _literal(v) == "*":
+                                    wildcard = True
+                if wildcard:
+                    hits.add(("SS007", node.lineno))
+        if isinstance(node, ast.Attribute) and _name(node) in {"request.data", "request.get_data"}:
+            hits.add(("SS008", node.lineno))
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value.startswith("http://"):
+            host = urlsplit(node.value).hostname
+            if host and host not in {"localhost", "127.0.0.1", "::1"}:
+                hits.add(("SS004", node.lineno))
+    return sorted(hits, key=lambda h: (h[1], h[0]))
+
+
 def scan(root: Path) -> list[Finding]:
-    findings: list[Finding] = []
+    """Read source only. Never import or execute the application being scanned."""
+    findings = []
+    rules = {rule.rule_id: rule for rule in RULES}
+    root = root.resolve()
     for path in sorted(root.rglob("*")):
-        if not path.is_file() or any(part in SKIP_DIRS for part in path.parts):
+        if path.is_symlink() or not path.is_file():
             continue
-        if path.suffix.lower() not in TEXT_EXTENSIONS and path.name not in {"Dockerfile", "requirements.txt"}:
+        relative = path.relative_to(root)
+        if any(part in SKIP_DIRS for part in relative.parts):
+            continue
+        if path.suffix.lower() not in TEXT_EXTENSIONS and path.name not in {".env", "Dockerfile", "requirements.txt"}:
             continue
         try:
-            lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
-        except OSError:
+            source = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
             continue
-        for line_no, line in enumerate(lines, start=1):
-            for rule in RULES:
-                match = rule.pattern.search(line)
-                if match:
-                    excerpt = line.strip()
-                    if rule.rule_id == "SS002":
-                        excerpt = re.sub(r"(['\"])[^'\"]+\1", r"\1[REDACTED]\1", excerpt)
-                    findings.append(Finding(
-                        rule.rule_id, rule.title, rule.stride, rule.severity,
-                        str(path.relative_to(root)), line_no, excerpt[:180],
-                        rule.explanation, rule.recommendation,
-                    ))
+        lines = source.splitlines()
+        if path.suffix.lower() == ".py":
+            try:
+                hits = _python_hits(source)
+            except SyntaxError as exc:
+                raise ValueError(f"Cannot parse {relative}:{exc.lineno}; scan stopped to avoid an incomplete report") from exc
+        else:
+            hits = []
+            for line_no, line in enumerate(lines, 1):
+                if line.lstrip().startswith(("#", ";", "//")):
+                    continue
+                for rule in RULES:
+                    if rule.pattern.search(line):
+                        hits.append((rule.rule_id, line_no))
+        for rule_id, line_no in hits:
+            rule = rules[rule_id]
+            # Do not copy raw source into any report: credentials may share a line
+            # with a different finding or appear inside URL user information.
+            excerpt = f"{rule.title} detected; source content withheld. Review the source at this location."
+            findings.append(Finding(rule.rule_id, rule.title, rule.stride, rule.severity,
+                str(relative), line_no, excerpt, rule.explanation, rule.recommendation))
     return findings
+
+
+def write_csv(output: Path, target: Path, findings: list[Finding]) -> None:
+    with output.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=list(Finding.__dataclass_fields__))
+        writer.writeheader()
+        for finding in findings:
+            # Neutralize spreadsheet formula prefixes in untrusted filenames.
+            row = asdict(finding)
+            writer.writerow({k: "'" + v if isinstance(v, str) and v.startswith(("=", "+", "-", "@")) else v for k, v in row.items()})
 
 
 def summary(findings: list[Finding]) -> dict:
@@ -110,7 +222,7 @@ def summary(findings: list[Finding]) -> dict:
 
 
 def write_json(output: Path, target: Path, findings: list[Finding]) -> None:
-    payload = {"tool": "SecureScope", "target": str(target), "summary": summary(findings),
+    payload = {"tool": "SecureScope", "version": VERSION, "limitations": "Static indicators require human review. No dataflow or complete STRIDE coverage. Raw source is withheld to protect secrets.", "target": str(target), "summary": summary(findings),
                "findings": [asdict(f) for f in findings]}
     output.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
@@ -119,7 +231,7 @@ def write_html(output: Path, target: Path, findings: list[Finding]) -> None:
     counts = summary(findings)
     rows = "".join(
         f"<tr><td>{html.escape(f.severity)}</td><td>{html.escape(f.stride)}</td>"
-        f"<td>{html.escape(f.title)}</td><td>{html.escape(f.file)}:{f.line}</td>"
+        f"<td><strong>{html.escape(f.rule_id)}: {html.escape(f.title)}</strong><p>{html.escape(f.explanation)}</p></td><td>{html.escape(f.file)}:{f.line}</td>"
         f"<td><code>{html.escape(f.evidence)}</code></td><td>{html.escape(f.recommendation)}</td></tr>"
         for f in findings
     )
@@ -131,21 +243,36 @@ th{{background:#163a63;color:white}}tr:nth-child(even){{background:#f4f7fa}}code
 <p><strong>Total findings:</strong> {counts['total_findings']} &nbsp; <strong>Critical:</strong> {counts['by_severity']['Critical']}
 &nbsp; <strong>High:</strong> {counts['by_severity']['High']} &nbsp; <strong>Medium:</strong> {counts['by_severity']['Medium']}</p>
 <table><thead><tr><th>Severity</th><th>STRIDE</th><th>Finding</th><th>Location</th><th>Evidence</th><th>Recommendation</th></tr></thead>
-<tbody>{rows}</tbody></table><p><em>Prototype output requires human review and does not prove that an application is secure.</em></p></body></html>"""
+<tbody>{rows or "<tr><td colspan='6'>No supported indicators found. This does not prove the application is secure.</td></tr>"}</tbody></table><p><em>Prototype output requires human review and does not prove that an application is secure.</em></p></body></html>"""
     output.write_text(document, encoding="utf-8")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Scan a Python web application for STRIDE-related security indicators.")
+    parser.add_argument("--version", action="version", version="SecureScope " + VERSION)
+    parser.add_argument("--csv", type=Path, help="Optional CSV report")
     parser.add_argument("target", type=Path, help="Project directory to scan")
     parser.add_argument("--json", type=Path, default=Path("securescope-report.json"))
     parser.add_argument("--html", type=Path, default=Path("securescope-report.html"))
     args = parser.parse_args()
     if not args.target.is_dir():
         parser.error("target must be an existing directory")
-    findings = scan(args.target.resolve())
+    try:
+        findings = scan(args.target.resolve())
+    except ValueError as exc:
+        parser.error(str(exc))
+    outputs = [args.json, args.html] + ([args.csv] if args.csv else [])
+    if len({p.resolve() for p in outputs}) != len(outputs):
+        parser.error("report output paths must be distinct")
+    for output in outputs:
+        if output.resolve().is_relative_to(args.target.resolve()):
+            parser.error("save reports outside the scanned directory")
+        output.parent.mkdir(parents=True, exist_ok=True)
     write_json(args.json, args.target, findings)
     write_html(args.html, args.target, findings)
+    if args.csv:
+        write_csv(args.csv, args.target, findings)
+        print(f"CSV report: {args.csv}")
     print(f"SecureScope found {len(findings)} potential issues.")
     print(f"JSON report: {args.json}\nHTML report: {args.html}")
     return 0
